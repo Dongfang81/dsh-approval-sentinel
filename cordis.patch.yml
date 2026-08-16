@@ -1,0 +1,14 @@
+# dsh-approval-sentinel — 帮我批准: 审批超时后由全新风险评估 agent 兜底
+#
+# Bundle patch: inserts the plugin row into the profile roster. Install with:
+#   dsh plugin --profile web add dsh-approval-sentinel
+# (or a local checkout: dsh plugin --profile web add ./dsh-approval-sentinel)
+#
+# Optional row config (defaults apply when omitted):
+#   config:
+#     graceMs: 120000
+#     assessorModel: deepseek-v4-flash
+#     denyPatterns: [...]
+- insert:
+    - id: approval-sentinel
+      name: 'dsh-approval-sentinel'
