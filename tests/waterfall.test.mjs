@@ -16,7 +16,9 @@ import {
   quickCheck,
   buildSessionContext,
   createGate,
-  buildNotice
+  buildNotice,
+  matchAllowRules,
+  extractEscalationMode
 } from "../lib/core.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -316,6 +318,61 @@ async function main() {
   await scenario("quickCheck tolerates malformed regex", () => {
     assert.equal(quickCheck("bash", "rm -rf /", { denyPatterns: ["[unclosed"], allowPatterns: [] }), undefined);
     assert.equal(quickCheck("bash", "npm install", { denyPatterns: ["[unclosed"], allowPatterns: ["npm"] }), "allow");
+  });
+
+  // 19. extractEscalationMode parses the shared reason shape.
+  await scenario("extractEscalationMode parses escalation reasons", () => {
+    assert.equal(extractEscalationMode("escalate sandbox to danger-full-access: run tests"), "danger-full-access");
+    assert.equal(extractEscalationMode("escalate sandbox to workspace-write: npm install"), "workspace-write");
+    assert.equal(extractEscalationMode("just a plain reason"), undefined);
+    assert.equal(extractEscalationMode(undefined), undefined);
+  });
+
+  // 20. matchAllowRules dimension matching.
+  await scenario("matchAllowRules matches tool/mode/pattern with wildcards", () => {
+    const rules = [
+      { tool: "bash", mode: "danger-full-access", pattern: "npm", note: "npm installs" },
+      { tool: "", mode: "workspace-write", pattern: "" },
+      { tool: "*", mode: "", pattern: "pnpm", enabled: false },
+      { tool: "fs", mode: "", pattern: "" }
+    ];
+    assert.equal(matchAllowRules("bash", "escalate sandbox to danger-full-access: npm run build", "danger-full-access", rules)?.note, "npm installs");
+    assert.equal(matchAllowRules("bash", "escalate sandbox to danger-full-access: yarn build", "danger-full-access", rules), undefined, "pattern mismatch");
+    assert.ok(matchAllowRules("bash", "escalate sandbox to workspace-write: anything", "workspace-write", rules), "empty tool+pattern = wildcard");
+    assert.ok(matchAllowRules("fs", "escalate sandbox to workspace-write: write file", "workspace-write", rules), "fs tool rule");
+    assert.equal(matchAllowRules("bash", "escalate sandbox to danger-full-access: yarn x", "danger-full-access", rules), undefined, "disabled rule must not match");
+    // the same pnpm rule, enabled, does match
+    assert.ok(matchAllowRules("bash", "escalate sandbox to danger-full-access: pnpm x", "danger-full-access", [{ tool: "*", mode: "", pattern: "pnpm", enabled: true }]), "enabled pnpm rule matches");
+    assert.equal(matchAllowRules("bash", "x", "danger-full-access", undefined), undefined);
+  });
+
+  // 21. allowRules hit → auto-approve WITHOUT dialog/assessor, even over denyPatterns.
+  await scenario("allowRules hit → allowed-once (no dialog, no assessor, overrides deny)", async () => {
+    let nextCalled = 0;
+    let assessed = 0;
+    const outcome = await runApprovalFlow({
+      req: makeReq({ reason: "escalate sandbox to danger-full-access: npm run build" }),
+      next: () => { nextCalled += 1; return new Promise(() => {}); },
+      cfg: baseCfg({
+        allowRules: [{ tool: "bash", mode: "danger-full-access", pattern: "npm", note: "npm builds" }],
+        denyPatterns: ["npm"] // must be overridden by the explicit user grant
+      }),
+      deps: makeDeps({ assess: async () => { assessed += 1; return { verdict: "reject", riskLevel: "critical", rationale: "" }; } })
+    });
+    assert.equal(outcome, "allowed-once");
+    assert.equal(nextCalled, 0, "allow-rule must not open the dialog");
+    assert.equal(assessed, 0, "allow-rule must not spawn an assessor");
+  });
+
+  // 22. allowRules non-match falls through to the normal flow.
+  await scenario("allowRules non-match → normal assessor flow", async () => {
+    const outcome = await runApprovalFlow({
+      req: makeReq({ reason: "escalate sandbox to workspace-write: run npm install" }),
+      next: () => new Promise(() => {}),
+      cfg: baseCfg({ graceMs: 10, allowRules: [{ tool: "bash", mode: "danger-full-access", pattern: "npm" }] }),
+      deps: makeDeps()
+    });
+    assert.equal(outcome, "allowed-once"); // via the assessor
   });
 
   console.log(`\nall ${passed} scenarios passed`);

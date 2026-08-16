@@ -15,7 +15,8 @@ This plugin adds a **grace-then-review** fallback, the same spirit as [Codex's `
 1. The normal approval dialog still appears first, and you have a **grace window** (default 120 s) to click Allow / Deny — your decision always wins.
 2. If the window expires (or there is no human channel at all — headless), the plugin spawns a **fresh risk-assessment agent**: zero conversation context, no tools, structured output. It sees the exact request and the agent's recent activity (including the actual tool arguments), and returns `allow` / `reject` / `wait`.
 3. **Only `allow` auto-approves.** `reject`, `wait`, or an assessor failure are NEVER auto-decided: the plugin notifies the session and keeps the approval dialog waiting until **you** evaluate and act — the subagent can flag risk, but only you can deny.
-4. Every auto-decision is recorded in the approval audit log (`approval/asked` + `approval/decided`) and announced as a user-visible message in the session.
+4. **Always allow** (codex-style): once the assessor approves a request, reply **`始终允许`** in the session and the plugin remembers it — the same request never asks again (or use the settings panel to add/edit rules).
+5. Every auto-decision is recorded in the approval audit log (`approval/asked` + `approval/decided`) and announced as a user-visible message in the session.
 
 ## How it differs from [dsh-approval-llm](https://github.com/Letter2025/dsh-approval-llm)
 
@@ -67,10 +68,30 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
 | `assessTimeoutMs` | `90000` | Deadline for one assessor run (ms). |
 | `maxConcurrentAssessments` | `3` | Cap on concurrently running assessor agents (extra requests queue). |
 | `assessorModel` / `assessorProvider` | *(inherit the requesting agent's route)* | Explicit reviewer model/provider override. |
+| `allowRules` | `[]` | **Always allow** rules — a match auto-approves with NO dialog/review. Each: `{ tool?, mode?, pattern?, note?, enabled? }` (empty / `*` = wildcard; `pattern` is a regex over the reason). Matched first, overrides `denyPatterns`. |
 | `denyPatterns` | destructive defaults | Deterministic danger regexes: a hit is NOT an auto-denial — the request is handed to you (no model call). |
 | `allowPatterns` | `[]` | Deterministic quick-allow regexes (a deny hit still wins and goes to you). |
 | `notifyUser` | `true` | Inject a user-visible decision notice into the session. |
 | `verbose` | `true` | Extra info-level logging. |
+
+## Always allow
+
+Two ways to add an "always allow" rule (codex-style):
+
+1. **By replying** — after the assessor auto-approves a request, the notice suggests it, and you reply `始终允许` (or `always allow`) in the session. The plugin persists `{ tool, mode, pattern: <this request's full reason> }` for that request, so the identical request is approved instantly next time. Tighten `pattern` to a regex in the settings panel if you want it broader (or narrower).
+2. **By editing** — add/edit rules in the settings panel (namespace `approval-sentinel` → `allowRules`) or in `settings.yaml`:
+
+```yaml
+approval-sentinel:
+  allowRules:
+    - tool: bash
+      mode: danger-full-access
+      pattern: "npm (install|run)"
+      note: npm workflows
+      enabled: true
+```
+
+Matching is per-rule: every specified dimension must match (`tool` name, escalation target `mode`, `pattern` regex over the reason); empty fields are wildcards. Rules are checked **before** `denyPatterns` — an explicit always-allow grant overrides the built-in danger list, so keep rules as narrow as possible.
 
 ## How it works
 
@@ -78,6 +99,7 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
 approval/request (waterfall)
    │
    ├─ enabled? no ──────────────────────────────► next() (unchanged)
+   ├─ allowRules hit ───────────────────────────► 'allowed-once' (always allow, no dialog/review)
    ├─ denyPatterns hit ─────────────────────────► pending-human: notify + wait for YOU
    ├─ allowPatterns hit ────────────────────────► 'allowed-once'
    ├─ start the human channel (next()) and race a grace timer
@@ -97,11 +119,11 @@ The assessor subagent is spawned through `ctx.subagents` with the `spawn`-family
 ## Development
 
 ```sh
-pnpm test   # 18 engine scenarios + 5 wiring smoke tests (no harness needed)
+pnpm test   # 22 engine scenarios + 8 wiring smoke tests (no harness needed)
 ```
 
 - `lib/core.js` — the pure decision engine (no cordis imports; fully unit-tested).
-- `lib/index.js` — the cordis adapter: prepend `approval/request` listener, `ctx.subagents` spawn, settings wiring, session notices.
+- `lib/index.js` — the cordis adapter: prepend `approval/request` listener, `ctx.subagents` spawn, settings wiring (incl. always-allow persistence), session notices, `session/event` observer for the `始终允许` reply.
 
 ## License
 

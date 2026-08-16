@@ -8,11 +8,35 @@
 import assert from "node:assert/strict";
 import { apply } from "../lib/index.js";
 
-function makeCtx({ services = {}, listeners = [], injected = [] } = {}) {
+function makeCtx({ services = {}, listeners = [], injected = [], settings = null } = {}) {
+  const updates = [];
   return {
     logger: () => ({ info() {}, warn() {}, debug() {} }),
     get: (name) => services[name],
-    inject: () => {}, // no settings service → installSettingsSection is a no-op
+    inject: (deps, callback) => {
+      if (settings !== null && Array.isArray(deps) && deps.includes("settings")) {
+        // minimal settings service: register returns an owner scope whose
+        // get() decodes base + user section through the schema (defaults fill in)
+        let registerOptions = {};
+        const scope = {
+          get: () => registerOptions.schema({ ...registerOptions.base, ...settings.section }),
+          update: async (patch) => {
+            updates.push(patch);
+            settings.section = { ...settings.section, ...patch };
+          },
+          watch: () => () => {}
+        };
+        const sctx = {
+          settings: { register: (ns, schema, options) => {
+            registerOptions = { schema, base: options?.base };
+            return scope;
+          } },
+          effect: () => () => {}
+        };
+        callback(sctx);
+      }
+      return () => {};
+    },
     on: (name, listener, options) => {
       listeners.push({ name, listener, options });
       return () => {};
@@ -21,7 +45,8 @@ function makeCtx({ services = {}, listeners = [], injected = [] } = {}) {
     sandboxPolicy: { resolve: () => ({ mode: "workspace-write", workspaceRoot: "/work" }) },
     _services: services,
     _listeners: listeners,
-    _injected: injected
+    _injected: injected,
+    _settingsUpdates: updates
   };
 }
 
@@ -56,13 +81,15 @@ async function scenario(name, fn) {
 }
 
 async function main() {
-  // 1. Listener registered prepend on approval/request.
-  await scenario("registers prepend listener on approval/request", () => {
+  // 1. Listeners: approval/request prepended, session/event observer.
+  await scenario("registers listeners (approval prepend + session observer)", () => {
     const ctx = makeCtx();
     apply(ctx, {});
-    assert.equal(ctx._listeners.length, 1);
-    assert.equal(ctx._listeners[0].name, "approval/request");
-    assert.equal(ctx._listeners[0].options, true, "must prepend (outermost in the waterfall)");
+    const approval = ctx._listeners.find((entry) => entry.name === "approval/request");
+    const sessionEvent = ctx._listeners.find((entry) => entry.name === "session/event");
+    assert.ok(approval, "approval/request listener must be registered");
+    assert.equal(approval.options, true, "approval/request must prepend (outermost in the waterfall)");
+    assert.ok(sessionEvent, "session/event listener must be registered");
   });
 
   // 2. Human never answers → fresh assessor subagent → allowed-once + notice.
@@ -95,7 +122,7 @@ async function main() {
       injected
     });
     apply(ctx, { graceMs: 30 });
-    const listener = ctx._listeners[0].listener;
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
     const outcome = await listener(makeReq(agent), () => new Promise(() => {}));
     assert.equal(outcome, "allowed-once");
 
@@ -135,7 +162,7 @@ async function main() {
       injected
     });
     apply(ctx, { graceMs: 200 });
-    const listener = ctx._listeners[0].listener;
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
     const outcome = await listener(makeReq(agent), () => Promise.resolve("rejected"));
     assert.equal(outcome, "rejected");
     assert.equal(started, 0);
@@ -165,7 +192,7 @@ async function main() {
       injected
     });
     apply(ctx, { graceMs: 30 });
-    const listener = ctx._listeners[0].listener;
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
     // The user comes back later and rejects it themselves.
     const outcome = await listener(makeReq(agent), () => new Promise((resolve) => setTimeout(() => resolve("rejected"), 70)));
     assert.equal(outcome, "rejected"); // the USER's rejection
@@ -177,10 +204,121 @@ async function main() {
   await scenario("no subagents service → assessor error → human decides", async () => {
     const ctx = makeCtx({ services: {} }); // no subagents at all
     apply(ctx, { graceMs: 30 });
-    const listener = ctx._listeners[0].listener;
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
     // Grace (30ms) expires, assessor throws, the flow keeps waiting; the user answers at 60ms.
     const outcome = await listener(makeReq(makeAgent([])), () => new Promise((resolve) => setTimeout(() => resolve("allowed-once"), 60)));
     assert.equal(outcome, "allowed-once");
+  });
+
+  // 6. Assessor allow → the notice suggests the "始终允许" interaction.
+  await scenario("assessor allow → notice suggests always-allow", async () => {
+    const injected = [];
+    const agent = makeAgent(injected);
+    const ctx = makeCtx({
+      services: {
+        subagents: {
+          list: () => ["spawn"],
+          getProvider: (name) => ({ name, inheritsParentContext: false }),
+          start: async () => ({
+            id: "child-3",
+            result: Promise.resolve({
+              output: [],
+              structured: { verdict: "allow", riskLevel: "low", rationale: "in-workspace npm install" },
+              stopReason: "completed"
+            }),
+            dispose: async () => {}
+          })
+        }
+      },
+      injected
+    });
+    apply(ctx, { graceMs: 30 });
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
+    await listener(makeReq(agent), () => new Promise(() => {}));
+    assert.ok(injected.length >= 1);
+    assert.match(injected[0].content[0].text, /回复：始终允许/);
+    assert.match(injected[0].content[0].text, /已自动放行/);
+  });
+
+  // 7. User replies "始终允许" after an auto-approval → rule persisted via settings.
+  await scenario("reply 始终允许 persists an allow rule", async () => {
+    const injected = [];
+    const agent = makeAgent(injected);
+    const settings = { base: {}, section: {} };
+    const ctx = makeCtx({
+      settings,
+      services: {
+        subagents: {
+          list: () => ["spawn"],
+          getProvider: (name) => ({ name, inheritsParentContext: false }),
+          start: async () => ({
+            id: "child-4",
+            result: Promise.resolve({
+              output: [],
+              structured: { verdict: "allow", riskLevel: "low", rationale: "safe" },
+              stopReason: "completed"
+            }),
+            dispose: async () => {}
+          })
+        },
+        agents: { get: (id) => agent }
+      },
+      injected
+    });
+    apply(ctx, { graceMs: 30 });
+    const req = makeReq(agent);
+    const approvalListener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
+    await approvalListener(req, () => new Promise(() => {})); // grace expiry → assessor allow
+
+    // Now the user replies "始终允许" in the same session.
+    const eventListener = ctx._listeners.find((entry) => entry.name === "session/event").listener;
+    const session = { id: "s1" };
+    eventListener(session, { type: "user/message", data: { role: "user", content: [{ type: "text", text: "始终允许" }] } });
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the async addAlwaysRule settle
+
+    assert.equal(ctx._settingsUpdates.length, 1, "settings.update must be called once");
+    const rules = ctx._settingsUpdates[0].allowRules;
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0].tool, "bash");
+    assert.equal(rules[0].mode, "workspace-write");
+    assert.equal(rules[0].pattern, req.reason);
+    assert.match(injected.at(-1).content[0].text, /已添加「始终允许」规则/);
+
+    // Replying again → duplicate, no second update.
+    eventListener(session, { type: "user/message", data: { role: "user", content: [{ type: "text", text: "始终允许" }] } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(ctx._settingsUpdates.length, 1, "duplicate rule must not be persisted twice");
+  });
+
+  // 8. No settings service → "始终允许" reply cannot persist; announces the limitation.
+  await scenario("reply 始终允许 without settings → limitation notice", async () => {
+    const injected = [];
+    const agent = makeAgent(injected);
+    const ctx = makeCtx({
+      services: {
+        subagents: {
+          list: () => ["spawn"],
+          getProvider: (name) => ({ name, inheritsParentContext: false }),
+          start: async () => ({
+            id: "child-5",
+            result: Promise.resolve({
+              output: [],
+              structured: { verdict: "allow", riskLevel: "low", rationale: "safe" },
+              stopReason: "completed"
+            }),
+            dispose: async () => {}
+          })
+        },
+        agents: { get: (id) => agent }
+      },
+      injected
+    });
+    apply(ctx, { graceMs: 30 });
+    await ctx._listeners.find((entry) => entry.name === "approval/request").listener(makeReq(agent), () => new Promise(() => {}));
+    const eventListener = ctx._listeners.find((entry) => entry.name === "session/event").listener;
+    eventListener({ id: "s1" }, { type: "user/message", data: { role: "user", content: [{ type: "text", text: "始终允许" }] } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(injected.at(-1).content[0].text, /无法持久化/);
   });
 
   console.log(`\nall ${passed} integration scenarios passed`);

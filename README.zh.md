@@ -15,7 +15,8 @@ DeepSeek Harness 的 agent 需要升级沙箱权限（写工作区外文件、�
 1. 正常审批对话框照常弹出，你有**宽限期**（默认 120 秒）点击「批准 / 拒绝」——你的决定永远优先；
 2. 宽限超时（或根本没有任何人工通道——headless）后，插件拉一个**全新的风险评估 agent**：零对话上下文、无工具、结构化输出。它能看到具体请求和 agent 的近期活动（含实际工具参数），返回 `allow` / `reject` / `wait`；
 3. **只有 `allow` 会自动放行。** `reject`、`wait` 或评审失败都**绝不会被自动决定**：插件通知会话并让审批弹窗**一直等待你本人评估和操作**——子 agent 可以标记风险，但只有你能拒绝；
-4. 每次自动决定都会写入审批审计日志（`approval/asked` + `approval/decided`），并向会话注入一条可见消息。
+4. **始终允许**（codex 同款）：评审放行过一条请求后，在会话里回复 **`始终允许`**，插件就会记住它——同类请求下次直接放行（也可在设置面板增删规则）；
+5. 每次自动决定都会写入审批审计日志（`approval/asked` + `approval/decided`），并向会话注入一条可见消息。
 
 ## 与 [dsh-approval-llm](https://github.com/Letter2025/dsh-approval-llm) 的差异
 
@@ -67,11 +68,30 @@ dsh plugin --profile web add ./dsh-approval-sentinel
 | `assessTimeoutMs` | `90000` | 单次评审的截止时间（毫秒）。 |
 | `maxConcurrentAssessments` | `3` | 并发评审 agent 上限（超出排队）。 |
 | `assessorModel` / `assessorProvider` | *继承请求 agent 的路线* | 评审模型的显式覆盖。 |
+| `allowRules` | `[]` | **始终允许**规则——命中即**不再弹窗/评审，直接放行**。每条：`{ tool?, mode?, pattern?, note?, enabled? }`（空 / `*` = 通配；`pattern` 是对 reason 的正则）。最先匹配，覆盖 `denyPatterns`。 |
 | `denyPatterns` | 破坏性操作默认集 | 确定性危险正则：命中**不是自动拒绝**，而是转交你本人（不调用模型）。 |
-| `denyPatterns` | 破坏性操作默认集 | 确定性快速拒绝正则，先于任何模型调用检查。 |
 | `allowPatterns` | `[]` | 确定性快速放行正则（deny 仍优先）。 |
 | `notifyUser` | `true` | 向会话注入可见的决策通知。 |
 | `verbose` | `true` | 额外 info 级日志。 |
+
+## 始终允许（Always allow）
+
+两种方式添加「始终允许」规则（codex 同款）：
+
+1. **直接回复**——评审 agent 自动放行一条请求后，通知里会附带提示；你在会话里回复 **`始终允许`**（或 `always allow`），插件就把该请求的 `{ tool, mode, pattern: <本次请求全文> }` 持久化为规则，下次同类请求**直接放行、不再弹窗/评审**。想放宽/收紧匹配，再到设置面板把 `pattern` 改成正则。
+2. **手动编辑**——在设置面板（`approval-sentinel` → `allowRules`）或 `settings.yaml` 中增删规则：
+
+```yaml
+approval-sentinel:
+  allowRules:
+    - tool: bash
+      mode: danger-full-access
+      pattern: "npm (install|run)"
+      note: npm 工作流
+      enabled: true
+```
+
+匹配规则：每条规则的每个已填写维度都必须命中（`tool` 工具名、升级目标 `mode`、`pattern` 对 reason 的正则）；空字段为通配。规则在 `denyPatterns` **之前**检查——显式的「始终允许」会覆盖内置危险清单，所以规则请尽量收窄。
 
 ## 工作原理
 
@@ -79,6 +99,7 @@ dsh plugin --profile web add ./dsh-approval-sentinel
 approval/request（waterfall 钩子）
    │
    ├─ enabled? no ──────────────────────────────► next()（原样转交）
+   ├─ allowRules 命中 ──────────────────────────► 'allowed-once'（始终允许，不再弹窗/评审）
    ├─ denyPatterns 命中 ────────────────────────► 转交人工：通知 + 等你本人决定
    ├─ allowPatterns 命中 ───────────────────────► 'allowed-once'
    ├─ 启动人工通道（next()）并与宽限计时器赛跑
@@ -98,7 +119,7 @@ approval/request（waterfall 钩子）
 ## 开发
 
 ```sh
-pnpm test   # 18 个引擎场景 + 5 个接线冒烟测试（无需完整 harness）
+pnpm test   # 22 个引擎场景 + 8 个接线冒烟测试（无需完整 harness）
 ```
 
 - `lib/core.js` — 纯决策引擎（无 cordis 依赖，完整单测）。

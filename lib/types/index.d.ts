@@ -10,6 +10,19 @@ export interface AssessorVerdict {
   rationale: string;
 }
 
+export interface AllowRule {
+  /** Tool name to match; empty / "*" = any tool. */
+  tool?: string;
+  /** Escalation target mode to match (e.g. `danger-full-access`); empty = any. */
+  mode?: string;
+  /** Regex over the full reason; empty = any reason. */
+  pattern?: string;
+  /** Human-readable note, surfaced in notices. */
+  note?: string;
+  /** Set false to disable the rule without deleting it. */
+  enabled?: boolean;
+}
+
 export interface SentinelConfig {
   /** Master switch; false delegates every request to the human channel. */
   enabled: boolean;
@@ -25,6 +38,8 @@ export interface SentinelConfig {
   assessorModel: string;
   /** Reviewer provider override; empty = inherit the requesting agent's route. */
   assessorProvider: string;
+  /** "Always allow" rules: a match auto-approves without dialog/review. */
+  allowRules: AllowRule[];
   /** Deterministic quick-deny regexes. */
   denyPatterns: string[];
   /** Deterministic quick-allow regexes (deny wins). */
@@ -47,6 +62,10 @@ export interface SentinelApprovalRequest {
 export type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
 
 export function quickCheck(toolName: string, reason: string | undefined, cfg: Pick<SentinelConfig, "denyPatterns" | "allowPatterns">): "allow" | "reject" | undefined;
+
+export function extractEscalationMode(reason: string | undefined): string | undefined;
+
+export function matchAllowRules(toolName: string, reason: string, mode: string | undefined, rules: readonly AllowRule[] | undefined): AllowRule | undefined;
 
 export function buildSessionContext(events: readonly any[], options?: { maxEvents?: number; maxEventChars?: number; maxTotalChars?: number }): string;
 
