@@ -115,7 +115,7 @@ async function main() {
     // notice injected into the session
     assert.ok(injected.length >= 1, "auto-decision must be announced");
     assert.match(injected[0].content[0].text, /帮我批准/);
-    assert.match(injected[0].content[0].text, /已自动批准/);
+    assert.match(injected[0].content[0].text, /已自动放行/);
     assert.equal(injected[0].source.kind, "plugin");
   });
 
@@ -142,8 +142,8 @@ async function main() {
     assert.equal(injected.length, 0, "a human decision needs no sentinel notice");
   });
 
-  // 4. Assessor returns reject → rejected + notice.
-  await scenario("assessor reject → rejected + notice", async () => {
+  // 4. Assessor returns reject → NOT an auto-denial: notify and keep waiting for the user.
+  await scenario("assessor reject → pending-human → user decides", async () => {
     const injected = [];
     const agent = makeAgent(injected);
     const ctx = makeCtx({
@@ -166,17 +166,19 @@ async function main() {
     });
     apply(ctx, { graceMs: 30 });
     const listener = ctx._listeners[0].listener;
-    const outcome = await listener(makeReq(agent), () => new Promise(() => {}));
-    assert.equal(outcome, "rejected");
-    assert.match(injected[0].content[0].text, /已自动拒绝/);
+    // The user comes back later and rejects it themselves.
+    const outcome = await listener(makeReq(agent), () => new Promise((resolve) => setTimeout(() => resolve("rejected"), 70)));
+    assert.equal(outcome, "rejected"); // the USER's rejection
+    assert.match(injected[0].content[0].text, /已交由你本人决定/);
+    assert.match(injected[0].content[0].text, /审批弹窗保持等待/);
   });
 
-  // 5. No subagents service → contained failure → handed to human (wait) → human decides.
+  // 5. No subagents service → contained failure → handed to human → human decides.
   await scenario("no subagents service → assessor error → human decides", async () => {
     const ctx = makeCtx({ services: {} }); // no subagents at all
     apply(ctx, { graceMs: 30 });
     const listener = ctx._listeners[0].listener;
-    // next() resolves after 60ms — inside the second re-armed window (30-90ms).
+    // Grace (30ms) expires, assessor throws, the flow keeps waiting; the user answers at 60ms.
     const outcome = await listener(makeReq(makeAgent([])), () => new Promise((resolve) => setTimeout(() => resolve("allowed-once"), 60)));
     assert.equal(outcome, "allowed-once");
   });

@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**帮我批准 (approve-for-me) for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): when a permission approval goes unanswered, a fresh risk-assessment agent reviews the request — auto-approving low-risk operations, rejecting dangerous ones, and keeping the dialog waiting for you when uncertain.**
+**帮我批准 (approve-for-me) for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): when a permission approval goes unanswered, a fresh risk-assessment agent reviews the request — auto-approving low-risk operations, and flagging anything risky for YOU to decide (it never auto-denies).**
 
 English | [中文](README.zh.md)
 
@@ -14,7 +14,7 @@ This plugin adds a **grace-then-review** fallback, the same spirit as [Codex's `
 
 1. The normal approval dialog still appears first, and you have a **grace window** (default 120 s) to click Allow / Deny — your decision always wins.
 2. If the window expires (or there is no human channel at all — headless), the plugin spawns a **fresh risk-assessment agent**: zero conversation context, no tools, structured output. It sees the exact request and the agent's recent activity (including the actual tool arguments), and returns `allow` / `reject` / `wait`.
-3. `allow` → the escalation proceeds; `reject` → it is denied; `wait` → the dialog keeps waiting for you (up to `maxWaits` rounds, then it fails closed to reject).
+3. **Only `allow` auto-approves.** `reject`, `wait`, or an assessor failure are NEVER auto-decided: the plugin notifies the session and keeps the approval dialog waiting until **you** evaluate and act — the subagent can flag risk, but only you can deny.
 4. Every auto-decision is recorded in the approval audit log (`approval/asked` + `approval/decided`) and announced as a user-visible message in the session.
 
 ## How it differs from [dsh-approval-llm](https://github.com/Letter2025/dsh-approval-llm)
@@ -25,7 +25,7 @@ Both are DSH equivalents of Codex "帮我批准", but they are complementary des
 | --- | --- | --- |
 | Trigger | A **mode switch**: pick the `帮我批准` permission preset and a separate reviewer **model** answers every ask (model first, human second). | A **timeout fallback**: the human dialog comes first; only when it goes unanswered (or no answerer exists) does the reviewer step in. |
 | Reviewer | A separate **reviewer model call**. | A **fresh subagent** (`subagent-spawn-in-process`) — zero parent context, tool-less, structured-output verdict — the closest DSH equivalent of Codex's guardian subagent. |
-| Uncertainty | `ESCALATE` → hands to the human immediately. | `wait` → re-arms the human grace window (no re-assessment), fail-closed to reject after `maxWaits`. |
+| Uncertainty | `ESCALATE` → hands to the human immediately. | `reject`/`wait` → NEVER auto-decided: the dialog keeps waiting for you (only `allow` auto-approves). |
 | Headless | Fails closed when no human answerer is composed. | Reviews headless asks directly (optionally after `headlessGraceMs`). |
 
 If you want "always reviewed by the model" semantics, use dsh-approval-llm. If you want "ask the human first, review only when they're away", use this plugin.
@@ -55,7 +55,6 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
   config:
     graceMs: 120000
     assessorModel: deepseek-v4-flash
-    maxWaits: 2
     denyPatterns:
       - "rm\\s+-rf\\s+/"
 ```
@@ -66,12 +65,10 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
 | `graceMs` | `120000` | How long to wait for the human before the assessor steps in (ms). |
 | `headlessGraceMs` | `0` | Extra wait before reviewing when there is no human answerer at all (ms). |
 | `assessTimeoutMs` | `90000` | Deadline for one assessor run (ms). |
-| `maxWaits` | `2` | `wait` rounds before failing closed to `rejected`. |
 | `maxConcurrentAssessments` | `3` | Cap on concurrently running assessor agents (extra requests queue). |
 | `assessorModel` / `assessorProvider` | *(inherit the requesting agent's route)* | Explicit reviewer model/provider override. |
-| `onAssessError` | `wait` | Assessor failure: `wait` hands back to the human (then fails closed), `reject` denies immediately. |
-| `denyPatterns` | destructive defaults | Deterministic quick-deny regexes, checked before any model call. |
-| `allowPatterns` | `[]` | Deterministic quick-allow regexes (deny still wins). |
+| `denyPatterns` | destructive defaults | Deterministic danger regexes: a hit is NOT an auto-denial — the request is handed to you (no model call). |
+| `allowPatterns` | `[]` | Deterministic quick-allow regexes (a deny hit still wins and goes to you). |
 | `notifyUser` | `true` | Inject a user-visible decision notice into the session. |
 | `verbose` | `true` | Extra info-level logging. |
 
@@ -81,21 +78,21 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
 approval/request (waterfall)
    │
    ├─ enabled? no ──────────────────────────────► next() (unchanged)
-   ├─ denyPatterns hit ─────────────────────────► 'rejected'   (deterministic, no model)
+   ├─ denyPatterns hit ─────────────────────────► pending-human: notify + wait for YOU
    ├─ allowPatterns hit ────────────────────────► 'allowed-once'
    ├─ start the human channel (next()) and race a grace timer
    │    ├─ human answers in time ───────────────► their outcome wins
    │    ├─ no answerer ('unavailable') ─────────► headless review (after headlessGraceMs)
-   │    └─ grace expires ───────────────────────► fresh risk-assessment subagent
-   │         ├─ allow ──────────────────────────► 'allowed-once'
-   │         ├─ reject ─────────────────────────► 'rejected'
-   │         └─ wait ───────────────────────────► re-arm the human window; after maxWaits → 'rejected'
+   │    └─ grace expires ───────────────────────► fresh risk-assessment subagent (once)
+   │         ├─ allow ──────────────────────────► 'allowed-once' (auto-approve)
+   │         └─ reject / wait / error ──────────► notify + keep the dialog waiting
+   │                                              until YOU decide (never auto-denies)
    │
    └─ every auto-decision is audited (approval/asked + approval/decided)
       and announced as a session message
 ```
 
-The assessor subagent is spawned through `ctx.subagents` with the `spawn`-family provider (fresh agent, `inheritsParentContext: false`), restricted to **no tools** (`toolFilter: { allow: [] }`), and required to answer through the structured-output capture tool. Its prompt treats the request as untrusted data and instructs it to prefer `wait`/`reject` over `allow` for anything destructive, irreversible, or outside the workspace.
+The assessor subagent is spawned through `ctx.subagents` with the `spawn`-family provider (fresh agent, `inheritsParentContext: false`), restricted to **no tools** (`toolFilter: { allow: [] }`), and required to answer through the structured-output capture tool. Its prompt treats the request as untrusted data and instructs it to prefer `wait`/`reject` over `allow` for anything destructive, irreversible, or outside the workspace — knowing that `reject`/`wait` only hand the decision back to you, they are never executed as denials.
 
 ## Development
 

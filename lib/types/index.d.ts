@@ -19,16 +19,12 @@ export interface SentinelConfig {
   headlessGraceMs: number;
   /** End-to-end deadline for one assessor run (ms). Default 90000. */
   assessTimeoutMs: number;
-  /** `wait` rounds before failing closed to `rejected`. Default 2. */
-  maxWaits: number;
   /** Max concurrently running assessor agents. Default 3. */
   maxConcurrentAssessments: number;
   /** Reviewer model override; empty = inherit the requesting agent's route. */
   assessorModel: string;
   /** Reviewer provider override; empty = inherit the requesting agent's route. */
   assessorProvider: string;
-  /** `wait` hands an assessor failure back to the human; `reject` denies immediately. */
-  onAssessError: "reject" | "wait";
   /** Deterministic quick-deny regexes. */
   denyPatterns: string[];
   /** Deterministic quick-allow regexes (deny wins). */
@@ -59,7 +55,7 @@ export function runApprovalFlow(input: {
   next: () => Promise<ApprovalOutcome>;
   cfg: SentinelConfig;
   deps: {
-    assess: (input: { req: SentinelApprovalRequest; cfg: SentinelConfig; headless: boolean; waitRound: number }) => Promise<AssessorVerdict>;
+    assess: (input: { req: SentinelApprovalRequest; cfg: SentinelConfig; headless: boolean }) => Promise<AssessorVerdict>;
     sleep: (ms: number) => Promise<void>;
     log?: (level: string, ...args: any[]) => void;
     notify?: (agent: any, text: string) => void;

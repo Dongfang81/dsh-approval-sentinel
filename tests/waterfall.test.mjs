@@ -3,6 +3,11 @@
 // adapter wires it: sentinel listener outermost, a fake "human channel"
 // answerer behind it (or none = headless), and a fake risk assessor.
 //
+// POLICY UNDER TEST: the assessor may AUTO-APPROVE (allow) but may never
+// auto-deny — reject / wait / assessor error all hand the request back to the
+// human and keep waiting until the user acts. Only headless (no answerer at
+// all) fails closed.
+//
 // Run: node tests/waterfall.test.mjs
 
 import assert from "node:assert/strict";
@@ -15,6 +20,16 @@ import {
 } from "../lib/core.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 function makeReq(overrides = {}) {
   return {
@@ -35,11 +50,9 @@ function baseCfg(overrides = {}) {
     graceMs: 40,
     headlessGraceMs: 0,
     assessTimeoutMs: 1000,
-    maxWaits: 2,
     maxConcurrentAssessments: 3,
     assessorModel: "",
     assessorProvider: "",
-    onAssessError: "wait",
     denyPatterns: [],
     allowPatterns: [],
     notifyUser: true,
@@ -71,30 +84,30 @@ async function scenario(name, fn) {
 }
 
 async function main() {
-  // 1. Deterministic quick-deny (no human, no assessor).
-  await scenario("quick-deny via denyPatterns", async () => {
-    const cfg = baseCfg({ denyPatterns: ["rm\\s+-rf\\s+/"] });
+  // 1. Deterministic quick-allow (no human, no assessor).
+  await scenario("quick-allow via allowPatterns", async () => {
     let nextCalled = 0;
     const outcome = await runApprovalFlow({
-      req: makeReq({ reason: "escalate sandbox to danger-full-access: rm -rf / tmp cleanup" }),
-      next: () => { nextCalled += 1; return new Promise(() => {}); },
-      cfg,
-      deps: makeDeps()
-    });
-    assert.equal(outcome, "rejected");
-    assert.equal(nextCalled, 0, "quick-deny must not touch the human channel");
-  });
-
-  // 2. Deterministic quick-allow.
-  await scenario("quick-allow via allowPatterns", async () => {
-    const cfg = baseCfg({ allowPatterns: ["npm install"] });
-    const outcome = await runApprovalFlow({
       req: makeReq({ reason: "escalate sandbox to workspace-write: npm install deps" }),
-      next: () => new Promise(() => {}),
-      cfg,
+      next: () => { nextCalled += 1; return new Promise(() => {}); },
+      cfg: baseCfg({ allowPatterns: ["npm install"] }),
       deps: makeDeps()
     });
     assert.equal(outcome, "allowed-once");
+    assert.equal(nextCalled, 0, "quick-allow must not touch the human channel");
+  });
+
+  // 2. Quick-deny is NOT an auto-denial: hand to the human and wait for THEIR decision.
+  await scenario("quick-deny → pending-human → user decides", async () => {
+    let assessed = 0;
+    const outcome = await runApprovalFlow({
+      req: makeReq({ reason: "escalate sandbox to danger-full-access: rm -rf / tmp cleanup" }),
+      next: () => sleep(15).then(() => "rejected"),
+      cfg: baseCfg({ denyPatterns: ["rm\\s+-rf\\s+/"], graceMs: 200 }),
+      deps: makeDeps({ assess: async () => { assessed += 1; return { verdict: "allow", riskLevel: "low", rationale: "should not run" }; } })
+    });
+    assert.equal(outcome, "rejected"); // the HUMAN's rejection
+    assert.equal(assessed, 0, "quick-deny must not spawn an assessor");
   });
 
   // 3. Human answers inside the grace window → their outcome wins, no assessor.
@@ -110,7 +123,7 @@ async function main() {
     assert.equal(assessed, 0, "assessor must not run when the human answers");
   });
 
-  // 4. Human silent → grace expiry → assessor allow → allowed-once.
+  // 4. Grace expiry + assessor allow → auto-approved.
   await scenario("grace expiry + assessor allow → allowed-once", async () => {
     const outcome = await runApprovalFlow({
       req: makeReq(),
@@ -121,48 +134,57 @@ async function main() {
     assert.equal(outcome, "allowed-once");
   });
 
-  // 5. Human silent → assessor reject → rejected.
-  await scenario("grace expiry + assessor reject → rejected", async () => {
-    const outcome = await runApprovalFlow({
-      req: makeReq(),
-      next: () => new Promise(() => {}),
-      cfg: baseCfg({ graceMs: 20 }),
-      deps: makeDeps({ assess: async () => ({ verdict: "reject", riskLevel: "critical", rationale: "exfiltration pattern" }) })
-    });
-    assert.equal(outcome, "rejected");
-  });
-
-  // 6. Assessor `wait` → re-arms the human window → late human answer wins.
-  await scenario("assessor wait → human answers on the second window", async () => {
+  // 5. Assessor reject is NOT an auto-denial: wait for the user's own decision.
+  await scenario("assessor reject → pending-human → user decides", async () => {
     let assessed = 0;
     const outcome = await runApprovalFlow({
       req: makeReq(),
-      next: () => sleep(30).then(() => "rejected"),
+      next: () => sleep(80).then(() => "rejected"),
+      cfg: baseCfg({ graceMs: 20 }),
+      deps: makeDeps({
+        assess: async () => { assessed += 1; return { verdict: "reject", riskLevel: "critical", rationale: "exfiltration pattern" }; }
+      })
+    });
+    assert.equal(outcome, "rejected"); // the HUMAN's rejection, not the assessor's
+    assert.equal(assessed, 1, "assessor runs exactly once");
+  });
+
+  // 6. Assessor wait → keeps waiting for the user (no re-assessment, no auto-deny).
+  await scenario("assessor wait → keeps waiting until the user acts", async () => {
+    let assessed = 0;
+    const outcome = await runApprovalFlow({
+      req: makeReq(),
+      next: () => sleep(60).then(() => "allowed-once"),
       cfg: baseCfg({ graceMs: 20 }),
       deps: makeDeps({
         assess: async () => { assessed += 1; return { verdict: "wait", riskLevel: "medium", rationale: "unclear" }; }
       })
     });
-    assert.equal(outcome, "rejected"); // the late HUMAN decision
+    assert.equal(outcome, "allowed-once"); // the user's late decision
     assert.equal(assessed, 1, "wait must not re-assess");
   });
 
-  // 7. Assessor `wait` twice → fail closed to rejected (no human ever answers).
-  await scenario("wait exhausted after maxWaits → rejected", async () => {
+  // 7. Non-allow keeps waiting INDEFINITELY — the flow stays pending until the user acts.
+  await scenario("non-allow waits indefinitely (no fail-closed)", async () => {
+    const human = deferred();
     let assessed = 0;
-    const outcome = await runApprovalFlow({
+    const flow = runApprovalFlow({
       req: makeReq(),
-      next: () => new Promise(() => {}),
-      cfg: baseCfg({ graceMs: 10, maxWaits: 2 }),
+      next: () => human.promise,
+      cfg: baseCfg({ graceMs: 10 }),
       deps: makeDeps({
         assess: async () => { assessed += 1; return { verdict: "wait", riskLevel: "medium", rationale: "unclear" }; }
       })
     });
-    assert.equal(outcome, "rejected");
-    assert.equal(assessed, 2);
+    // 150ms later the flow must still be waiting (no maxWaits fail-closed).
+    const early = await Promise.race([flow.then((o) => ["settled", o]), sleep(150).then(() => ["waiting"])]);
+    assert.deepEqual(early, ["waiting"], "must keep waiting for the human");
+    assert.equal(assessed, 1);
+    human.resolve("rejected");
+    assert.equal(await flow, "rejected");
   });
 
-  // 8. Headless (next → unavailable) → assessor allow → allowed-once.
+  // 8. Headless (next → unavailable) + assessor allow → auto-approved.
   await scenario("headless + assessor allow → allowed-once", async () => {
     const outcome = await runApprovalFlow({
       req: makeReq(),
@@ -173,7 +195,7 @@ async function main() {
     assert.equal(outcome, "allowed-once");
   });
 
-  // 9. Headless + assessor wait → fail closed (no human to wait for).
+  // 9. Headless + assessor wait → fail closed (nobody to wait for).
   await scenario("headless + assessor wait → rejected", async () => {
     const outcome = await runApprovalFlow({
       req: makeReq(),
@@ -184,25 +206,23 @@ async function main() {
     assert.equal(outcome, "rejected");
   });
 
-  // 10. Assessor failure + onAssessError=wait → handed back to human → late answer wins.
-  await scenario("assessor error → onAssessError wait → human decides", async () => {
-    // Round 0: grace (10ms) expires, assessor throws → wait → re-arm.
-    // Round 1: human answers at 15ms, inside the second window → their call wins.
+  // 10. Assessor failure → handed back to the human → the user decides.
+  await scenario("assessor error → pending-human → user decides", async () => {
     const outcome = await runApprovalFlow({
       req: makeReq(),
-      next: () => sleep(15).then(() => "allowed-once"),
-      cfg: baseCfg({ graceMs: 10, onAssessError: "wait" }),
+      next: () => sleep(50).then(() => "allowed-once"),
+      cfg: baseCfg({ graceMs: 10 }),
       deps: makeDeps({ assess: async () => { throw new Error("provider down"); } })
     });
-    assert.equal(outcome, "allowed-once");
+    assert.equal(outcome, "allowed-once"); // the user's decision
   });
 
-  // 11. Assessor failure + onAssessError=reject → rejected immediately.
-  await scenario("assessor error → onAssessError reject → rejected", async () => {
+  // 11. Headless + assessor failure → fail closed.
+  await scenario("headless + assessor error → rejected", async () => {
     const outcome = await runApprovalFlow({
       req: makeReq(),
-      next: () => new Promise(() => {}),
-      cfg: baseCfg({ graceMs: 10, onAssessError: "reject" }),
+      next: () => Promise.resolve("unavailable"),
+      cfg: baseCfg({ graceMs: 10 }),
       deps: makeDeps({ assess: async () => { throw new Error("provider down"); } })
     });
     assert.equal(outcome, "rejected");
@@ -245,7 +265,7 @@ async function main() {
     assert.equal(outcome, "allowed-once");
   });
 
-  // 15. buildSessionContext renders tool-call arguments (the real command).
+  // 15. buildSessionContext renders tool calls + messages.
   await scenario("buildSessionContext renders tool calls + messages", () => {
     const events = [
       { type: "user/message", data: { role: "user", content: [{ type: "text", text: "请修一下构建" }] } },
@@ -266,7 +286,7 @@ async function main() {
     assert.doesNotMatch(context, /approval\/asked/, "non-surface events must be skipped");
   });
 
-  // 16. createGate serializes beyond the cap.
+  // 16. createGate caps concurrency.
   await scenario("createGate caps concurrency", async () => {
     const gate = createGate(1);
     let running = 0;
@@ -281,12 +301,15 @@ async function main() {
     assert.equal(peak, 1, "max 1 concurrent through the gate");
   });
 
-  // 17. buildNotice carries the brand + rationale.
-  await scenario("buildNotice includes 帮我批准 and rationale", () => {
-    const notice = buildNotice(makeReq(), "allowed-once", "low", "在仓库内操作", { headless: false, waitRound: 0, source: "assessor" });
-    assert.match(notice, /帮我批准/);
-    assert.match(notice, /已自动批准/);
-    assert.match(notice, /在仓库内操作/);
+  // 17. buildNotice carries the brand + the pending-human wording.
+  await scenario("buildNotice includes 帮我批准 and state wording", () => {
+    const allow = buildNotice(makeReq(), "allowed-once", "low", "在仓库内操作", { headless: false, source: "assessor" });
+    assert.match(allow, /帮我批准/);
+    assert.match(allow, /已自动放行/);
+    assert.match(allow, /在仓库内操作/);
+    const pending = buildNotice(makeReq(), "pending-human", "high", "评审判定不可放行", { headless: false, source: "assessor" });
+    assert.match(pending, /已交由你本人决定/);
+    assert.match(pending, /审批弹窗保持等待/);
   });
 
   // 18. quickCheck edge: malformed regex is skipped, not thrown.
