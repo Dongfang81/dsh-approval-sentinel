@@ -361,8 +361,9 @@ async function main() {
     const hooks = apply(ctx, { notifyPermissionRequest: true, notifyMinIntervalMs: 0 });
     hooks.notifierState.impl = async (title, message) => { calls.push({ title, message }); return { ok: true }; };
     const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
-    listener(makeReq(agent), () => new Promise(() => {})); // fire-and-forget
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The human answers after 30ms so the flow settles (and its grace timer
+    // is cleared) instead of keeping the process alive.
+    await listener(makeReq(agent), () => new Promise((resolve) => setTimeout(() => resolve("rejected"), 30)));
     assert.equal(calls.length, 1);
     assert.match(calls[0].title, /需要权限审批/);
     assert.match(calls[0].message, /run npm install/);
