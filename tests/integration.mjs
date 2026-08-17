@@ -398,3 +398,49 @@ main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+// 13. Host config routes: GET/POST /dsh-approval-sentinel/config
+// (the GUI page reads/writes through these because the settings namespace is
+// not in the host-apiproxy describe whitelist).
+await scenario("host config route GET + POST", async () => {
+  const routes = [];
+  const updates = [];
+  let current = { enabled: true, graceMs: 120000, verbose: true };
+  const ctx = makeCtx({
+    services: { webServer: { register: (route) => { routes.push(route); return () => {}; } } }
+  });
+  // settings inject → fake scope with update()
+  ctx.inject = (deps, callback) => {
+    if (Array.isArray(deps) && deps.includes("settings")) {
+      const scope = {
+        get: () => current,
+        update: async (patch) => { updates.push(patch); current = { ...current, ...patch }; },
+        watch: () => () => {}
+      };
+      callback({ settings: { register: () => scope }, effect: () => () => {} });
+    }
+    return () => {};
+  };
+  apply(ctx, { graceMs: 120000 });
+  const route = routes.find((r) => r.path === "/dsh-approval-sentinel/config");
+  assert.ok(route, "config route must be registered");
+
+  const res = { writeHead(status, headers) { this._head = [status, headers]; }, end(body) { this._body = body; } };
+  // GET → current config
+  await route.handler({ method: "GET" }, res);
+  const got = JSON.parse(res._body);
+  assert.equal(got.ok, true);
+  assert.equal(got.value.graceMs, 120000);
+  assert.equal(typeof got.base, "object");
+
+  // POST → update + return new config
+  await route.handler({ method: "POST", [Symbol.asyncIterator]() { let i = 0; const chunks = [JSON.stringify({ graceMs: 5000 })]; return { next: async () => i < chunks.length ? { value: chunks[i++], done: false } : { done: true } }; } }, res);
+  const posted = JSON.parse(res._body);
+  assert.equal(posted.ok, true);
+  assert.equal(posted.value.graceMs, 5000);
+  assert.deepEqual(updates, [{ graceMs: 5000 }]);
+
+  // DELETE → 405
+  await route.handler({ method: "DELETE" }, res);
+  assert.equal(res._head[0], 405);
+});

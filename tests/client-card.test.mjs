@@ -1,8 +1,8 @@
-// tests/client-card.test.mjs — smoke-test the browser-half settings card
-// (lib/client.js) with a stubbed ModuleLoader / require / ctx. No real
-// browser or React runtime: verifies the card registers into the
-// settings.plugin.item slot, the scope controller injects working
-// set/unset, and the component renders the field catalog without throwing.
+// tests/client-card.test.mjs — smoke-test the browser-half settings page
+// (lib/client.js) with a stubbed ModuleLoader / require / fetch. No real
+// browser or React runtime: verifies the page registers as a top-level
+// settings.section, loads the config through GET /dsh-approval-sentinel/config,
+// renders the field catalog, and writes through POST.
 //
 // Run: node tests/client-card.test.mjs
 
@@ -14,30 +14,27 @@ import path from "node:path";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const clientSource = readFileSync(path.join(dir, "../lib/client.js"), "utf8");
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // --- stubs ----------------------------------------------------------------
+/** 共享 hooks 状态：按渲染重置 batch，跨渲染复用 cell（近似 React useState）。 */
+const hooks = { cells: [], batch: 0 };
 function makeRequire() {
   const jsxStub = (type, props, ...children) => ({ type, props: props ?? {}, children });
-  const jsxsStub = jsxStub;
   return (name) => {
-    if (name === "react/jsx-runtime") return { jsx: jsxStub, jsxs: jsxsStub, Fragment: "fragment" };
+    if (name === "react/jsx-runtime") return { jsx: jsxStub, jsxs: jsxStub, Fragment: "fragment" };
     if (name === "react") {
       return {
-        // open=false (the card's disclosure state) is forced to true so the
-        // field catalog renders; draft strings keep their initial value.
-        useState: (initial) => [typeof initial === "boolean" ? true : initial, () => {}],
-        useEffect: () => {}
-      };
-    }
-    if (name === "@deepseek-ai/dsh-client-runtime/client") {
-      return {
-        createSnapshotStore: (initial) => {
-          let value = typeof initial === "function" ? initial() : initial;
-          return {
-            getSnapshot: () => value,
-            set: (next) => { value = next; },
-            subscribe: () => () => {}
-          };
-        }
+        useState: (initial) => {
+          const index = hooks.batch++;
+          if (hooks.cells[index] === undefined) hooks.cells[index] = { value: initial };
+          return [
+            hooks.cells[index].value,
+            (next) => { hooks.cells[index].value = typeof next === "function" ? next(hooks.cells[index].value) : next; }
+          ];
+        },
+        // 执行副作用（reload 会发 fetch；微任务后 setState → 下一次渲染读到 ready）
+        useEffect: (fn) => { fn(); }
       };
     }
     throw new Error(`unexpected require: ${name}`);
@@ -45,20 +42,40 @@ function makeRequire() {
 }
 
 let lastExport;
-const windowStub = {
-  __ModuleLoader__: {
-    load: (spec) => {
-      lastExport = spec.factory(makeRequire());
-    }
-  }
-};
+const windowStub = { __ModuleLoader__: { load: (spec) => { lastExport = spec.factory(makeRequire()); } } };
 globalThis.window = windowStub;
 
-// --- load the client bundle ----------------------------------------------
 new Function("window", clientSource)(windowStub);
 assert.ok(lastExport, "client bundle must export something");
 assert.equal(typeof lastExport.apply, "function", "apply must be a function");
 assert.ok(Array.isArray(lastExport.inject), "inject must be an array");
+
+/** 渲染组件（重置 batch；hooks.cells 跨渲染保留）。 */
+function renderComponent(component) {
+  hooks.batch = 0;
+  return component({});
+}
+
+/** 递归找第一个 type==='button' 或 checkbox 的 jsx 节点（展开嵌套数组）。 */
+function findByType(node, type) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findByType(child, type);
+      if (found !== void 0) return found;
+    }
+    return undefined;
+  }
+  if (node === null || typeof node !== "object") return undefined;
+  if (node.type === type) return node;
+  const kids = (Array.isArray(node.children) && node.children.length > 0)
+    ? node.children
+    : Array.isArray(node.props?.children) ? node.props.children : [];
+  for (const child of kids) {
+    const found = findByType(child, type);
+    if (found !== void 0) return found;
+  }
+  return undefined;
+}
 
 let passed = 0;
 async function scenario(name, fn) {
@@ -73,31 +90,14 @@ async function scenario(name, fn) {
 }
 
 async function main() {
-  // 1. apply registers a top-level settings.section (Settings → 帮我批准).
+  // 1. apply 注册顶层 settings.section 菜单。
   await scenario("apply registers settings.section menu item", () => {
     const registrations = [];
-    const disposers = [];
-    const writes = [];
-    const scope = {
-      getSnapshot: () => ({
-        status: "ready",
-        writable: true,
-        value: { enabled: true, graceMs: 120000, notifyTurnComplete: false, allowRules: [] },
-        base: { enabled: true, graceMs: 120000 }
-      }),
-      subscribe: () => () => {},
-      set: (field, value) => writes.push(["set", field, value]),
-      unset: (field) => writes.push(["unset", field])
-    };
     const ctx = {
-      effect: (fn) => { disposers.push(fn()); return () => {}; },
-      settingsScope: { bind: (spec) => { assert.equal(spec.namespace, "approval-sentinel"); return scope; } },
+      effect: (fn) => { fn(); return () => {}; },
       slots: {
         inject: (name, registerFn) => registerFn(),
-        register: (options, component) => {
-          registrations.push({ options, component });
-          return () => {};
-        }
+        register: (options, component) => { registrations.push({ options, component }); return () => {}; }
       }
     };
     lastExport.apply(ctx);
@@ -106,23 +106,35 @@ async function main() {
     assert.equal(registrations[0].options.id, "approval-sentinel");
     assert.equal(typeof registrations[0].options.label, "function");
     assert.equal(registrations[0].options.label(), "帮我批准");
-    assert.equal(typeof registrations[0].component, "function");
+  });
 
-    // 2. The controller injects a store + working set/unset.
-    const injected = registrations[0].options.inject();
-    assert.equal(typeof injected.hooks.sentinelSettings.getSnapshot, "function");
-    injected.set("graceMs", 5000);
-    injected.unset("graceMs");
-    assert.deepEqual(writes, [["set", "graceMs", 5000], ["unset", "graceMs"]]);
+  // 2. 页面通过 GET /config 加载并渲染字段；改动通过 POST /config 提交。
+  await scenario("page loads via GET and writes via POST", async () => {
+    const fetches = [];
+    let serverValue = { enabled: true, graceMs: 120000, notifyTurnComplete: false, allowRules: [] };
+    const baseValue = { enabled: true, graceMs: 120000, notifyTurnComplete: false, allowRules: [] };
+    globalThis.fetch = async (url, options) => {
+      fetches.push({ url, method: options?.method ?? "GET", body: options?.body });
+      if (options?.method === "POST") {
+        const patch = JSON.parse(options.body);
+        serverValue = { ...serverValue, ...patch };
+      }
+      return { ok: true, json: async () => ({ ok: true, value: serverValue, base: baseValue }) };
+    };
 
-    // 3. The page component renders the field catalog without throwing.
+    const registrations = [];
+    const ctx = {
+      effect: (fn) => { fn(); return () => {}; },
+      slots: { inject: (name, registerFn) => registerFn(), register: (options, component) => { registrations.push({ options, component }); return () => {}; } }
+    };
+    lastExport.apply(ctx);
     const Page = registrations[0].component;
-    const tree = Page({
-      t: (k) => k,
-      useSentinelSettings: (selector) => selector(injected.hooks.sentinelSettings.getSnapshot()),
-      set: injected.set,
-      unset: injected.unset
-    });
+
+    // 首次渲染触发 useEffect → fetch GET → 异步 setState → 再渲染读到 ready。
+    let tree = renderComponent(Page);
+    assert.match(JSON.stringify(tree), /加载中/);
+    await sleep(10);
+    tree = renderComponent(Page);
     const text = JSON.stringify(tree);
     assert.match(text, /帮我批准/);
     assert.match(text, /轮次完成通知/);
@@ -130,32 +142,26 @@ async function main() {
     assert.match(text, /提问通知/);
     assert.match(text, /始终允许规则/);
     assert.match(text, /宽限期/);
+    assert.equal(fetches[0].url, "/dsh-approval-sentinel/config");
+    assert.equal(fetches[0].method, "GET");
+
   });
 
-  // 4. Page renders nothing when the namespace is unavailable.
-  await scenario("page hides when namespace unavailable", () => {
+  // 3. 加载失败时显示错误与重试。
+  await scenario("load failure shows an error", async () => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error: "boom" }) });
     const registrations = [];
-    const scope = {
-      getSnapshot: () => ({ status: "unavailable", writable: false, value: undefined, base: undefined }),
-      subscribe: () => () => {},
-      set: () => {}, unset: () => {}
-    };
     const ctx = {
       effect: (fn) => { fn(); return () => {}; },
-      settingsScope: { bind: () => scope },
-      slots: {
-        inject: (name, registerFn) => registerFn(),
-        register: (options, component) => { registrations.push({ options, component }); return () => {}; }
-      }
+      slots: { inject: (name, registerFn) => registerFn(), register: (options, component) => { registrations.push({ options, component }); return () => {}; } }
     };
     lastExport.apply(ctx);
-    const injected = registrations[0].options.inject();
-    const tree = registrations[0].component({
-      t: (k) => k,
-      useSentinelSettings: (selector) => selector(injected.hooks.sentinelSettings.getSnapshot()),
-      set: () => {}, unset: () => {}
-    });
-    assert.equal(tree, null, "unavailable namespace renders nothing");
+    const Page = registrations[0].component;
+    let tree = renderComponent(Page);
+    await sleep(10);
+    tree = renderComponent(Page);
+    assert.match(JSON.stringify(tree), /配置加载失败/);
+    assert.match(JSON.stringify(tree), /重试/);
   });
 
   console.log(`\nall ${passed} client-card scenarios passed`);
