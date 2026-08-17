@@ -73,8 +73,8 @@ async function scenario(name, fn) {
 }
 
 async function main() {
-  // 1. apply registers the settings.plugin.item card.
-  await scenario("apply registers settings.plugin.item card", () => {
+  // 1. apply registers a top-level settings.section (Settings → 帮我批准).
+  await scenario("apply registers settings.section menu item", () => {
     const registrations = [];
     const disposers = [];
     const writes = [];
@@ -93,6 +93,7 @@ async function main() {
       effect: (fn) => { disposers.push(fn()); return () => {}; },
       settingsScope: { bind: (spec) => { assert.equal(spec.namespace, "approval-sentinel"); return scope; } },
       slots: {
+        inject: (name, registerFn) => registerFn(),
         register: (options, component) => {
           registrations.push({ options, component });
           return () => {};
@@ -101,22 +102,24 @@ async function main() {
     };
     lastExport.apply(ctx);
     assert.equal(registrations.length, 1);
-    assert.equal(registrations[0].options.name, "settings.plugin.item");
+    assert.equal(registrations[0].options.name, "settings.section");
     assert.equal(registrations[0].options.id, "approval-sentinel");
+    assert.equal(typeof registrations[0].options.label, "function");
+    assert.equal(registrations[0].options.label(), "帮我批准");
     assert.equal(typeof registrations[0].component, "function");
 
     // 2. The controller injects a store + working set/unset.
     const injected = registrations[0].options.inject();
-    assert.equal(typeof injected.hooks.sentinelCard.getSnapshot, "function");
+    assert.equal(typeof injected.hooks.sentinelSettings.getSnapshot, "function");
     injected.set("graceMs", 5000);
     injected.unset("graceMs");
     assert.deepEqual(writes, [["set", "graceMs", 5000], ["unset", "graceMs"]]);
 
-    // 3. The card component renders the field catalog without throwing.
-    const Card = registrations[0].component;
-    const tree = Card({
+    // 3. The page component renders the field catalog without throwing.
+    const Page = registrations[0].component;
+    const tree = Page({
       t: (k) => k,
-      useSentinelCard: (selector) => selector(injected.hooks.sentinelCard.getSnapshot()),
+      useSentinelSettings: (selector) => selector(injected.hooks.sentinelSettings.getSnapshot()),
       set: injected.set,
       unset: injected.unset
     });
@@ -129,8 +132,8 @@ async function main() {
     assert.match(text, /宽限期/);
   });
 
-  // 4. Card renders nothing when the namespace is unavailable.
-  await scenario("card hides when namespace unavailable", () => {
+  // 4. Page renders nothing when the namespace is unavailable.
+  await scenario("page hides when namespace unavailable", () => {
     const registrations = [];
     const scope = {
       getSnapshot: () => ({ status: "unavailable", writable: false, value: undefined, base: undefined }),
@@ -140,13 +143,16 @@ async function main() {
     const ctx = {
       effect: (fn) => { fn(); return () => {}; },
       settingsScope: { bind: () => scope },
-      slots: { register: (options, component) => { registrations.push({ options, component }); return () => {}; } }
+      slots: {
+        inject: (name, registerFn) => registerFn(),
+        register: (options, component) => { registrations.push({ options, component }); return () => {}; }
+      }
     };
     lastExport.apply(ctx);
     const injected = registrations[0].options.inject();
     const tree = registrations[0].component({
       t: (k) => k,
-      useSentinelCard: (selector) => selector(injected.hooks.sentinelCard.getSnapshot()),
+      useSentinelSettings: (selector) => selector(injected.hooks.sentinelSettings.getSnapshot()),
       set: () => {}, unset: () => {}
     });
     assert.equal(tree, null, "unavailable namespace renders nothing");

@@ -10,10 +10,10 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./package.json": "./package.json",
     "./client": {
       "default": "./lib/client.js"
-    },
-    "./package.json": "./package.json"
+    }
   },
   "files": [
     "lib",
