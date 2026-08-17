@@ -409,7 +409,7 @@ await scenario("host config route GET + POST", async () => {
   const ctx = makeCtx({
     services: { webServer: { register: (route) => { routes.push(route); return () => {}; } } }
   });
-  // settings inject → fake scope with update()
+  // settings inject → fake scope with update(); webServer inject → the fake server
   ctx.inject = (deps, callback) => {
     if (Array.isArray(deps) && deps.includes("settings")) {
       const scope = {
@@ -418,6 +418,9 @@ await scenario("host config route GET + POST", async () => {
         watch: () => () => {}
       };
       callback({ settings: { register: () => scope }, effect: () => () => {} });
+    }
+    if (Array.isArray(deps) && deps.includes("webServer")) {
+      callback({ get: (name) => name === "webServer" ? { register: (route) => { routes.push(route); return () => {}; } } : undefined });
     }
     return () => {};
   };
