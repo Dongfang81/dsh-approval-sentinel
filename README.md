@@ -73,6 +73,28 @@ Editable live from the Web UI settings panel (namespace `approval-sentinel`) or 
 | `allowPatterns` | `[]` | Deterministic quick-allow regexes (a deny hit still wins and goes to you). |
 | `notifyUser` | `true` | Inject a user-visible decision notice into the session. |
 | `verbose` | `true` | Extra info-level logging. |
+| `notifyTurnComplete` | `false` | System notification when an agent turn completes (codex-style). |
+| `notifyPermissionRequest` | `false` | System notification when an approval request is waiting. |
+| `notifyQuestion` | `false` | System notification when the agent asks a question needing your input. |
+| `notifyMinIntervalMs` | `30000` | Minimum gap between two notifications of the same kind in the same session (anti-spam). |
+| `notifyBackend` | `auto` | `auto` (prefer terminal-notifier, fall back to osascript) / `osascript` / `terminal-notifier`. |
+| `notifySound` | `false` | Play the default sound with notifications. |
+
+## System notifications (codex-style)
+
+Three macOS system-notification switches, all **off by default** — flip them in the settings panel (namespace `approval-sentinel`) or `settings.yaml`:
+
+```yaml
+approval-sentinel:
+  notifyTurnComplete: true        # agent finished a turn
+  notifyPermissionRequest: true   # an approval dialog is waiting (pairs with 帮我批准)
+  notifyQuestion: true            # the agent needs your input
+  notifyMinIntervalMs: 30000      # anti-spam per kind+session
+```
+
+- Turn-complete fires on `turn/end`; permission fires when an `approval/request` arrives; question fires when the agent calls `ask_user_question`.
+- Notifications are throttled per kind+session (`notifyMinIntervalMs`), so a busy session cannot spam Notification Center.
+- The default backend is `osascript` (built into macOS, no install); install `terminal-notifier` for click-through notifications.
 
 ## Always allow
 
@@ -119,7 +141,7 @@ The assessor subagent is spawned through `ctx.subagents` with the `spawn`-family
 ## Development
 
 ```sh
-pnpm test   # 22 engine scenarios + 8 wiring smoke tests (no harness needed)
+pnpm test   # 24 engine + 9 notifier + 12 wiring scenarios (no harness needed)
 ```
 
 - `lib/core.js` — the pure decision engine (no cordis imports; fully unit-tested).

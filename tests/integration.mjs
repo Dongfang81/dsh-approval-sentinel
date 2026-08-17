@@ -321,6 +321,75 @@ async function main() {
     assert.match(injected.at(-1).content[0].text, /无法持久化/);
   });
 
+  // 9. Turn-complete system notification fires on turn/end when enabled.
+  await scenario("turn/end → turn-complete notification", async () => {
+    const calls = [];
+    const ctx = makeCtx();
+    const hooks = apply(ctx, { notifyTurnComplete: true, notifyMinIntervalMs: 0 });
+    hooks.notifierState.impl = async (title, message) => { calls.push({ title, message }); return { ok: true }; };
+    const eventListener = ctx._listeners.find((entry) => entry.name === "session/event").listener;
+    eventListener({ id: "s1" }, { type: "turn/end", data: { turn: 1, reason: "completed" } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].title, /轮次完成/);
+  });
+
+  // 10. Question notification fires when the agent calls ask_user_question.
+  await scenario("ask_user_question → needs-input notification", async () => {
+    const calls = [];
+    const ctx = makeCtx();
+    const hooks = apply(ctx, { notifyQuestion: true, notifyMinIntervalMs: 0 });
+    hooks.notifierState.impl = async (title, message) => { calls.push({ title, message }); return { ok: true }; };
+    const eventListener = ctx._listeners.find((entry) => entry.name === "session/event").listener;
+    eventListener({ id: "s1" }, {
+      type: "assistant/message",
+      data: { message: { role: "assistant", content: [
+        { type: "tool-call", name: "ask_user_question", arguments: JSON.stringify({ questions: [{ id: "q1", question: "继续执行吗？" }] }) }
+      ] } }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].title, /需要你的输入/);
+    assert.match(calls[0].message, /继续执行吗？/);
+  });
+
+  // 11. Permission notification fires when an approval request arrives.
+  await scenario("approval request → permission notification", async () => {
+    const calls = [];
+    const agent = makeAgent([]);
+    const ctx = makeCtx({ services: { subagents: { list: () => ["spawn"], getProvider: (n) => ({ name: n, inheritsParentContext: false }) } } });
+    const hooks = apply(ctx, { notifyPermissionRequest: true, notifyMinIntervalMs: 0 });
+    hooks.notifierState.impl = async (title, message) => { calls.push({ title, message }); return { ok: true }; };
+    const listener = ctx._listeners.find((entry) => entry.name === "approval/request").listener;
+    listener(makeReq(agent), () => new Promise(() => {})); // fire-and-forget
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].title, /需要权限审批/);
+    assert.match(calls[0].message, /run npm install/);
+  });
+
+  // 12. Switch off / throttle: no (second) notification.
+  await scenario("notification switch off and throttle", async () => {
+    const calls = [];
+    // switch off
+    const ctxOff = makeCtx();
+    const hooksOff = apply(ctxOff, { notifyTurnComplete: false, notifyMinIntervalMs: 0 });
+    hooksOff.notifierState.impl = async (title, message) => { calls.push({ title, message }); return { ok: true }; };
+    ctxOff._listeners.find((entry) => entry.name === "session/event").listener({ id: "s1" }, { type: "turn/end", data: {} });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(calls.length, 0, "disabled switch must not notify");
+    // throttle: two turn/end within the interval → one notification
+    const calls2 = [];
+    const ctx = makeCtx();
+    const hooks = apply(ctx, { notifyTurnComplete: true, notifyMinIntervalMs: 60000 });
+    hooks.notifierState.impl = async (title, message) => { calls2.push({ title, message }); return { ok: true }; };
+    const eventListener = ctx._listeners.find((entry) => entry.name === "session/event").listener;
+    eventListener({ id: "s1" }, { type: "turn/end", data: {} });
+    eventListener({ id: "s1" }, { type: "turn/end", data: {} });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(calls2.length, 1, "second turn/end inside the interval must be throttled");
+  });
+
   console.log(`\nall ${passed} integration scenarios passed`);
 }
 

@@ -18,7 +18,9 @@ import {
   createGate,
   buildNotice,
   matchAllowRules,
-  extractEscalationMode
+  extractEscalationMode,
+  shouldNotify,
+  extractQuestionText
 } from "../lib/core.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -373,6 +375,31 @@ async function main() {
       deps: makeDeps()
     });
     assert.equal(outcome, "allowed-once"); // via the assessor
+  });
+
+  // 23. shouldNotify: switch + throttle gate.
+  await scenario("shouldNotify gates by switch and interval", () => {
+    const now = 1000000;
+    assert.equal(shouldNotify({ enabled: false, minIntervalMs: 0, lastTs: undefined, now }), false, "disabled → no");
+    assert.equal(shouldNotify({ enabled: true, minIntervalMs: 0, lastTs: undefined, now }), true, "enabled, no history → yes");
+    assert.equal(shouldNotify({ enabled: true, minIntervalMs: 30000, lastTs: now - 10000, now }), false, "inside interval → no");
+    assert.equal(shouldNotify({ enabled: true, minIntervalMs: 30000, lastTs: now - 30000, now }), true, "exactly at interval → yes");
+    assert.equal(shouldNotify({ enabled: true, minIntervalMs: 30000, lastTs: now - 60000, now }), true, "past interval → yes");
+  });
+
+  // 24. extractQuestionText finds ask_user_question calls.
+  await scenario("extractQuestionText extracts the question", () => {
+    const content = [
+      { type: "text", text: "先检查一下" },
+      { type: "tool-call", name: "bash", arguments: JSON.stringify({ command: "ls" }) },
+      { type: "tool-call", name: "ask_user_question", arguments: JSON.stringify({ questions: [{ id: "q1", question: "要删除这些文件吗？", header: "确认" }] }) }
+    ];
+    assert.equal(extractQuestionText(content), "要删除这些文件吗？");
+    assert.equal(extractQuestionText([{ type: "tool-call", name: "ask_user_question", arguments: JSON.stringify({ question: "选哪个？" }) }]), "选哪个？");
+    assert.equal(extractQuestionText([{ type: "tool-call", name: "ask_user_question", arguments: "not-json" }]), "需要你的输入");
+    assert.equal(extractQuestionText([{ type: "tool-call", name: "bash", arguments: "{}" }]), undefined, "no question tool → undefined");
+    assert.equal(extractQuestionText(undefined), undefined);
+    assert.ok(extractQuestionText([{ type: "tool-call", name: "ask_user_question", arguments: JSON.stringify({ questions: [{ id: "q", question: "x".repeat(500) }] }) }], 50).length <= 51, "truncated (50 chars + ellipsis)");
   });
 
   console.log(`\nall ${passed} scenarios passed`);

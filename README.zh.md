@@ -73,6 +73,28 @@ dsh plugin --profile web add ./dsh-approval-sentinel
 | `allowPatterns` | `[]` | 确定性快速放行正则（deny 仍优先）。 |
 | `notifyUser` | `true` | 向会话注入可见的决策通知。 |
 | `verbose` | `true` | 额外 info 级日志。 |
+| `notifyTurnComplete` | `false` | 轮次完成时发系统通知（codex 同款）。 |
+| `notifyPermissionRequest` | `false` | 有待审批请求时发系统通知。 |
+| `notifyQuestion` | `false` | agent 提问需要你输入时发系统通知。 |
+| `notifyMinIntervalMs` | `30000` | 同一会话同类通知的最小间隔（防刷屏）。 |
+| `notifyBackend` | `auto` | `auto`（优先 terminal-notifier，回退 osascript）/ `osascript` / `terminal-notifier`。 |
+| `notifySound` | `false` | 通知附带默认提示音。 |
+
+## 系统通知（codex 同款）
+
+三个 macOS 系统通知开关，**默认全部关闭**——在设置面板（`approval-sentinel`）或 `settings.yaml` 中打开：
+
+```yaml
+approval-sentinel:
+  notifyTurnComplete: true        # agent 完成一轮
+  notifyPermissionRequest: true   # 有待审批的弹窗（配合「帮我批准」）
+  notifyQuestion: true            # agent 需要你的输入
+  notifyMinIntervalMs: 30000      # 同类+同会话防刷屏间隔
+```
+
+- 轮次完成：监听 `turn/end`；权限审批：`approval/request` 到达时；需要输入：agent 调用 `ask_user_question` 时。
+- 通知按「会话+类型」节流（`notifyMinIntervalMs`），忙碌会话不会刷屏通知中心。
+- 默认后端 `osascript`（macOS 自带，无需安装）；安装 `terminal-notifier` 后可点击通知跳转。
 
 ## 始终允许（Always allow）
 
@@ -119,7 +141,7 @@ approval/request（waterfall 钩子）
 ## 开发
 
 ```sh
-pnpm test   # 22 个引擎场景 + 8 个接线冒烟测试（无需完整 harness）
+pnpm test   # 24 个引擎 + 9 个通知器 + 12 个接线场景（无需完整 harness）
 ```
 
 - `lib/core.js` — 纯决策引擎（无 cordis 依赖，完整单测）。

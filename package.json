@@ -30,7 +30,7 @@
     "@deepseek-ai/dsh-llm": "*"
   },
   "scripts": {
-    "test": "node tests/waterfall.test.mjs && node tests/integration.mjs"
+    "test": "node tests/notifier.test.mjs && node tests/waterfall.test.mjs && node tests/integration.mjs"
   },
   "keywords": [
     "dsh",

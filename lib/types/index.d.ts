@@ -48,6 +48,18 @@ export interface SentinelConfig {
   notifyUser: boolean;
   /** Extra info-level logging. */
   verbose: boolean;
+  /** Notify when an agent turn completes (macOS system notification). */
+  notifyTurnComplete: boolean;
+  /** Notify when an approval request arrives. */
+  notifyPermissionRequest: boolean;
+  /** Notify when the agent asks a question needing the user's input. */
+  notifyQuestion: boolean;
+  /** Minimum gap between two notifications of the same kind in the same session (ms). */
+  notifyMinIntervalMs: number;
+  /** Notification backend: auto prefers terminal-notifier, falls back to osascript. */
+  notifyBackend: "auto" | "osascript" | "terminal-notifier";
+  /** Play the default sound with notifications. */
+  notifySound: boolean;
 }
 
 /** The approval request shape this plugin consumes. */
